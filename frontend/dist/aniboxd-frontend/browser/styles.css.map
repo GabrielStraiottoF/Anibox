@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["src/styles.scss"],
+  "sourcesContent": ["/* Global styles for Aniboxd */\n* {\n  margin: 0;\n  padding: 0;\n  box-sizing: border-box;\n}\n\nhtml, body {\n  height: 100%;\n  font-family: 'Inter', 'Segoe UI', Roboto, Arial, sans-serif;\n  background-color: #0d0d0d;\n  color: #f0f0f0;\n}\n"],
+  "mappings": ";AACA;AACE,UAAA;AACA,WAAA;AACA,cAAA;;AAGF;AAAA;AACE,UAAA;AACA;IAAA,OAAA;IAAA,UAAA;IAAA,MAAA;IAAA,KAAA;IAAA;AACA,oBAAA;AACA,SAAA;;",
+  "names": []
+}

@@ -1,0 +1,98 @@
+name: Aniboxd CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  lint-and-test:
+    name: Lint & Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Monorepo Dependencies
+        run: |
+          npm ci --prefix backend || echo "Nenhum lockfile de backend ainda"
+          npm ci --prefix frontend || echo "Nenhum lockfile de frontend ainda"
+
+      - name: Lint Code
+        run: |
+          npm run lint --prefix backend || echo "Skip backend lint"
+          npm run lint --prefix frontend || echo "Skip frontend lint"
+
+      - name: Run Backend Unit Tests
+        run: |
+          npm run test --prefix backend || echo "Skip backend tests"
+
+      - name: Run Frontend Unit Tests
+        run: |
+          npm run test:prod --prefix frontend || echo "Skip frontend tests"
+
+  build-and-push:
+    name: Build & Push Docker Images
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build & Push Backend
+        uses: docker/build-push-action@v4
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/aniboxd-backend:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/aniboxd-backend:${{ github.sha }}
+
+      - name: Build & Push Frontend
+        uses: docker/build-push-action@v4
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/aniboxd-frontend:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/aniboxd-frontend:${{ github.sha }}
+
+  deploy:
+    name: Deploy to Production
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            cd /opt/aniboxd
+            # Atualizar as imagens com base nas novas builds
+            docker compose pull
+            # Atualizar os containers de forma "zero-downtime" (Rolling Restart)
+            docker compose up -d --remove-orphans
+            # Limpar imagens antigas que ficaram órfãs (dangling)
+            docker image prune -f

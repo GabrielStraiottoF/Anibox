@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: aniboxd_postgres
+    environment:
+      POSTGRES_USER: aniboxd_user
+      POSTGRES_PASSWORD: aniboxd_secure_password
+      POSTGRES_DB: aniboxd_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aniboxd_user -d aniboxd_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - aniboxd_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: aniboxd_redis
+    command: redis-server --requirepass aniboxd_redis_secure_password
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "aniboxd_redis_secure_password", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - aniboxd_network
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: aniboxd_rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: aniboxd_mq_user
+      RABBITMQ_DEFAULT_PASS: aniboxd_mq_secure_password
+    ports:
+      - "5672:5672"     # AMQP protocol
+      - "15672:15672"   # Management UI
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - aniboxd_network
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  rabbitmq_data:
+    driver: local
+
+networks:
+  aniboxd_network:
+    driver: bridge
