@@ -75,24 +75,3 @@ jobs:
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/aniboxd-frontend:latest
             ${{ secrets.DOCKERHUB_USERNAME }}/aniboxd-frontend:${{ github.sha }}
-
-  deploy:
-    name: Deploy to Production
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@master
-        with:
-          host: ${{ secrets.PROD_HOST }}
-          username: ${{ secrets.PROD_USER }}
-          key: ${{ secrets.PROD_SSH_KEY }}
-          script: |
-            cd /opt/aniboxd
-            # Atualizar as imagens com base nas novas builds
-            docker compose pull
-            # Atualizar os containers de forma "zero-downtime" (Rolling Restart)
-            docker compose up -d --remove-orphans
-            # Limpar imagens antigas que ficaram órfãs (dangling)
-            docker image prune -f
