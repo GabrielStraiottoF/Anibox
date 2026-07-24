@@ -1,4 +1,4 @@
-FROM node:20-alpine
+FROM node:20-alpine AS build
 
 WORKDIR /app
 
@@ -8,23 +8,15 @@ RUN npm ci
 
 COPY . .
 
-RUN npm run build
-
-EXPOSE 3000
-
-CMD ["npm", "start"]
-FROM node:20-alpine
-
-WORKDIR /app
-
-COPY package*.json ./
-
-RUN npm ci
-
-COPY . .
+RUN chmod +x node_modules/.bin/ng
 
 RUN npm run build
 
-EXPOSE 3000
 
-CMD ["npm", "start"]
+FROM nginx:alpine
+
+COPY --from=build /app/dist/* /usr/share/nginx/html/
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]
