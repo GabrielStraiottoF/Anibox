@@ -1,9 +1,9 @@
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+import type { Request, Response } from 'express';
 import { createApp } from '../src/main';
 
-let cachedHandler: ((req: VercelRequest, res: VercelResponse) => unknown) | null = null;
+let cachedHandler: ((req: Request, res: Response) => unknown) | null = null;
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+export default async function handler(req: Request, res: Response) {
   if (!cachedHandler) {
     const app = await createApp();
     await app.init();
