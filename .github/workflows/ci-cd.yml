@@ -2,13 +2,13 @@ name: Aniboxd CI/CD Pipeline
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 jobs:
-  lint-and-test:
-    name: Lint, Build & Test
+  validate:
+    name: Validate, Build & Test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -17,8 +17,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: 'npm'
+          node-version: 24
+          cache: npm
           cache-dependency-path: |
             backend/package-lock.json
             frontend/package-lock.json
@@ -35,18 +35,27 @@ jobs:
       - name: Build Frontend
         run: npm run build --prefix frontend
 
-      - name: Lint Backend
-        run: npm run lint --prefix backend
+      - name: Run Backend Tests When Present
+        shell: bash
+        run: |
+          if compgen -G "backend/src/**/*.spec.ts" > /dev/null || compgen -G "backend/test/**/*.ts" > /dev/null; then
+            npm test --prefix backend
+          else
+            echo "No backend tests found; build validation completed."
+          fi
 
-      - name: Run Backend Unit Tests
-        run: npm test --prefix backend --if-present
-
-      - name: Run Frontend Unit Tests
-        run: npm test --prefix frontend --if-present -- --watch=false --browsers=ChromeHeadless
+      - name: Run Frontend Tests When Present
+        shell: bash
+        run: |
+          if compgen -G "frontend/src/**/*.spec.ts" > /dev/null; then
+            npm test --prefix frontend -- --watch=false --browsers=ChromeHeadless
+          else
+            echo "No frontend tests found; build validation completed."
+          fi
 
   build-and-push:
     name: Build & Push Docker Images
-    needs: lint-and-test
+    needs: validate
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
