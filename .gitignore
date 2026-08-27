@@ -1,17 +1,22 @@
 # Environment
 .env
 .env.*
+!.env.example
 
 # Dependencies
 node_modules/
 **/node_modules/
 
 # Build
-dist/
+/dist/
 **/dist/
+out-tsc/
+**/out-tsc/
+*.tsbuildinfo
 
 # Angular
 .angular/
+**/.angular/
 
 # Logs
 *.log
