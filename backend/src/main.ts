@@ -1,8 +1,9 @@
+import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { GlobalExceptionFilter } from './core/filters/global-exception.filter';
 
-export async function createApp() {
+async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
   app.setGlobalPrefix('api/v1');
@@ -19,16 +20,8 @@ export async function createApp() {
     credentials: true,
   });
 
-  return app;
-}
-
-async function bootstrap() {
-  const app = await createApp();
   const port = Number(process.env.PORT ?? 3000);
   await app.listen(port);
-  console.log(`Aniboxd Backend rodando em: http://localhost:${port}/api/v1`);
 }
 
-if (require.main === module) {
-  void bootstrap();
-}
+void bootstrap();
