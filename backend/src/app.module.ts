@@ -1,4 +1,5 @@
 import { MiddlewareConsumer, Module } from '@nestjs/common';
+import { AdminModule } from './core/admin/admin.module';
 import { AuthModule } from './core/auth/auth.module';
 import { CommunityModule } from './core/community/community.module';
 import { MediaController } from './core/controllers/media.controller';
@@ -9,7 +10,7 @@ import { PrismaModule } from './core/prisma/prisma.module';
 import { HealthController } from './health.controller';
 
 @Module({
-  imports: [PrismaModule, AuthModule, CommunityModule, ReviewModule],
+  imports: [PrismaModule, AuthModule, CommunityModule, ReviewModule, AdminModule],
   controllers: [HealthController, MediaController],
   providers: [ContentProviderService, AuditMiddleware],
 })
