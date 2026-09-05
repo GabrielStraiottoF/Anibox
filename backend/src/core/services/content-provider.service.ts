@@ -1,11 +1,12 @@
-import { Injectable, Logger, HttpException, HttpStatus } from '@nestjs/common';
-import { Observable, of, throwError, firstValueFrom } from 'rxjs';
-import { catchError, map, timeout, retry } from 'rxjs/operators';
+import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
+
+export type MediaType = 'ANIME' | 'MANGA';
+export type ContentProvider = 'anilist' | 'jikan' | 'kitsu';
 
 export interface NormalizedMedia {
   externalId: string;
   title: string;
-  type: 'ANIME' | 'MANGA' | 'MANHWA' | 'MANHUA' | 'LIGHT_NOVEL' | 'WEBTOON';
+  type: MediaType;
   coverUrl: string | null;
   bannerUrl: string | null;
   synopsis: string | null;
@@ -16,291 +17,206 @@ export interface NormalizedMedia {
   status: 'AIRING' | 'FINISHED' | 'UPCOMING' | 'HIATUS' | 'CANCELLED';
   totalEpisodes: number;
   totalChapters: number;
+  provider: ContentProvider;
 }
 
-enum CircuitState {
-  CLOSED,
-  OPEN,
-  HALF_OPEN
+export interface MediaSearchResult {
+  items: NormalizedMedia[];
+  page: number;
+  perPage: number;
+  hasNextPage: boolean;
+  provider: ContentProvider;
 }
+
+enum CircuitState { CLOSED, OPEN, HALF_OPEN }
+interface ProviderState { state: CircuitState; failures: number; lastStateChange: number }
 
 @Injectable()
 export class ContentProviderService {
   private readonly logger = new Logger(ContentProviderService.name);
-  
-  // Cache simulado ou injeção do Redis (neste esqueleto simulamos por simplicidade)
-  private redisCache = new Map<string, { data: NormalizedMedia; expiresAt: number }>();
-  
-  // Configurações do Circuit Breaker para APIs externas
-  private circuitStates = {
-    anilist: CircuitState.CLOSED,
-    jikan: CircuitState.CLOSED,
-    kitsu: CircuitState.CLOSED
+  private readonly cache = new Map<string, { expiresAt: number; data: unknown }>();
+  private readonly providerStates: Record<ContentProvider, ProviderState> = {
+    anilist: { state: CircuitState.CLOSED, failures: 0, lastStateChange: Date.now() },
+    jikan: { state: CircuitState.CLOSED, failures: 0, lastStateChange: Date.now() },
+    kitsu: { state: CircuitState.CLOSED, failures: 0, lastStateChange: Date.now() },
   };
-  private failureCounts = { anilist: 0, jikan: 0, kitsu: 0 };
-  private lastStateChange = { anilist: Date.now(), jikan: Date.now(), kitsu: Date.now() };
-  
-  private readonly FAILURE_THRESHOLD = 3; // falhas para abrir o circuito
-  private readonly COOLDOWN_PERIOD = 30000; // 30s de cooldown para tentar half-open
-  private readonly TIMEOUT_LIMIT = 3000; // 3s de timeout
+  private readonly failureThreshold = 3;
+  private readonly cooldownMs = 30_000;
+  private readonly timeoutMs = Number(process.env.CONTENT_API_TIMEOUT_MS ?? 5000);
 
-  constructor() {}
+  async getMediaDetails(externalId: string, type: MediaType, provider: ContentProvider = 'anilist'): Promise<NormalizedMedia> {
+    if (!externalId?.trim()) throw new HttpException('ID externo é obrigatório.', HttpStatus.BAD_REQUEST);
+    const cacheKey = `media:${provider}:${type}:${externalId}`;
+    const cached = this.getCache<NormalizedMedia>(cacheKey);
+    if (cached) return cached;
 
-  /**
-   * Busca e unifica detalhes de obras por ID externo
-   */
-  async getMediaDetails(externalId: string, type: 'ANIME' | 'MANGA'): Promise<NormalizedMedia> {
-    const cacheKey = `media:${type.toLowerCase()}:${externalId}`;
-    
-    // 1. Verificar Cache (Redis/Memória)
-    const cached = this.getCache(cacheKey);
-    if (cached) {
-      this.logger.debug(`[Cache Hit] Retornando mídia cacheada para chave: ${cacheKey}`);
-      return cached;
-    }
-
-    this.logger.log(`[Cache Miss] Buscando mídia externa: id=${externalId}, tipo=${type}`);
-
-    // 2. Tentar API Principal (AniList) com Circuit Breaker e Failover
-    try {
-      const data = await this.executeWithCircuitBreaker(
-        'anilist',
-        () => this.fetchFromAniList(externalId, type)
-      );
-      this.setCache(cacheKey, data, 3600); // 1 hora de cache
-      return data;
-    } catch (error: any) {
-      this.logger.warn(`[Failover] AniList falhou. Tentando Jikan API... Erro: ${error.message}`);
-      
-      // 3. Fallback para API Secundária (Jikan)
+    const providers: ContentProvider[] = [provider, ...(['anilist', 'jikan', 'kitsu'] as ContentProvider[]).filter((item) => item !== provider)];
+    let lastError: unknown;
+    for (const candidate of providers) {
       try {
-        const data = await this.executeWithCircuitBreaker(
-          'jikan',
-          () => this.fetchFromJikan(externalId, type)
-        );
-        this.setCache(cacheKey, data, 1800); // 30 minutos de cache
+        const data = await this.withCircuitBreaker(candidate, () => this.fetchMedia(candidate, externalId, type));
+        this.setCache(cacheKey, data, candidate === provider ? 3600 : 1800);
         return data;
-      } catch (jikanError: any) {
-        this.logger.warn(`[Failover] Jikan falhou. Tentando Kitsu API... Erro: ${jikanError.message}`);
-        
-        // 4. Fallback Terciário (Kitsu)
-        try {
-          const data = await this.executeWithCircuitBreaker(
-            'kitsu',
-            () => this.fetchFromKitsu(externalId, type)
-          );
-          this.setCache(cacheKey, data, 1800);
-          return data;
-        } catch (kitsuError: any) {
-          this.logger.error(`[Fatal] Todas as APIs de conteúdo falharam para a mídia ID: ${externalId}`);
-          throw new HttpException(
-            'Não foi possível obter os dados da obra no momento devido à indisponibilidade nos provedores externos.',
-            HttpStatus.SERVICE_UNAVAILABLE
-          );
-        }
+      } catch (error) {
+        lastError = error;
+        this.logger.warn(`Provider ${candidate} falhou para ${type}/${externalId}.`);
       }
     }
+    const notFound = lastError instanceof HttpException && lastError.getStatus() === HttpStatus.NOT_FOUND;
+    throw new HttpException(notFound ? 'Obra não encontrada nos provedores disponíveis.' : 'Não foi possível obter a obra no momento.', notFound ? HttpStatus.NOT_FOUND : HttpStatus.SERVICE_UNAVAILABLE);
   }
 
-  /**
-   * Executa uma função protegendo-a com uma máquina de estados de Circuit Breaker
-   */
-  private async executeWithCircuitBreaker(
-    apiName: 'anilist' | 'jikan' | 'kitsu',
-    apiCall: () => Promise<NormalizedMedia>
-  ): Promise<NormalizedMedia> {
-    const state = this.circuitStates[apiName];
+  async search(query: string, type: MediaType = 'ANIME', page = 1, perPage = 20, provider: ContentProvider = 'anilist'): Promise<MediaSearchResult> {
+    const normalizedQuery = query?.trim();
+    if (!normalizedQuery) throw new HttpException('Parâmetro q é obrigatório.', HttpStatus.BAD_REQUEST);
+    page = Math.max(1, Math.min(page, 1000));
+    perPage = Math.max(1, Math.min(perPage, 50));
+    const cacheKey = `search:${provider}:${type}:${page}:${perPage}:${normalizedQuery.toLowerCase()}`;
+    const cached = this.getCache<MediaSearchResult>(cacheKey);
+    if (cached) return cached;
+    const result = await this.withCircuitBreaker(provider, () => this.searchProvider(provider, normalizedQuery, type, page, perPage));
+    this.setCache(cacheKey, result, 300);
+    return result;
+  }
 
-    // Verificar se o circuito está aberto
-    if (state === CircuitState.OPEN) {
-      const timeSinceChange = Date.now() - this.lastStateChange[apiName];
-      if (timeSinceChange > this.COOLDOWN_PERIOD) {
-        this.logger.warn(`[Circuit Breaker] ${apiName} entrou em estado HALF-OPEN para teste.`);
-        this.circuitStates[apiName] = CircuitState.HALF_OPEN;
-      } else {
-        throw new Error(`Circuito aberto para ${apiName}. Ignorando chamada.`);
-      }
+  private async withCircuitBreaker<T>(provider: ContentProvider, operation: () => Promise<T>): Promise<T> {
+    const state = this.providerStates[provider];
+    if (state.state === CircuitState.OPEN) {
+      if (Date.now() - state.lastStateChange < this.cooldownMs) throw new Error(`Circuit open: ${provider}`);
+      state.state = CircuitState.HALF_OPEN;
     }
-
     try {
-      const result = await apiCall();
-      
-      // Se tiver sucesso no half-open ou closed, reseta as falhas
-      if (this.circuitStates[apiName] === CircuitState.HALF_OPEN) {
-        this.logger.log(`[Circuit Breaker] ${apiName} recuperado com sucesso. Circuito FECHADO.`);
-      }
-      this.circuitStates[apiName] = CircuitState.CLOSED;
-      this.failureCounts[apiName] = 0;
-      
+      const result = await operation();
+      state.state = CircuitState.CLOSED;
+      state.failures = 0;
       return result;
-    } catch (error: any) {
-      const wasHalfOpen = this.circuitStates[apiName] === CircuitState.HALF_OPEN;
-      this.failureCounts[apiName]++;
-      this.logger.warn(`[Circuit Breaker] Falha registrada na chamada para ${apiName}. Falhas acumuladas: ${this.failureCounts[apiName]}`);
-      
-      if (wasHalfOpen || this.failureCounts[apiName] >= this.FAILURE_THRESHOLD) {
-        this.logger.error(`[Circuit Breaker] ${apiName} falhou no teste HALF-OPEN ou atingiu limite de falhas. Circuito ABERTO por 30s.`);
-        this.circuitStates[apiName] = CircuitState.OPEN;
-        this.lastStateChange[apiName] = Date.now();
+    } catch (error) {
+      state.failures += 1;
+      if (state.state === CircuitState.HALF_OPEN || state.failures >= this.failureThreshold) {
+        state.state = CircuitState.OPEN;
+        state.lastStateChange = Date.now();
       }
-      
       throw error;
     }
   }
 
-  // Simulação de Chamada AniList (GraphQL)
-  private async fetchFromAniList(id: string, type: 'ANIME' | 'MANGA'): Promise<NormalizedMedia> {
-    // Simulamos uma chamada HTTP com timeout e retry usando RxJS
-    const obs$ = of({
-      id: id,
-      title: { romaji: 'Solo Leveling', english: 'Solo Leveling' },
-      type: type === 'ANIME' ? 'ANIME' : 'MANGA',
-      coverImage: { large: 'https://images.aniboxd.com/covers/sololeveling.jpg' },
-      bannerImage: 'https://images.aniboxd.com/banners/sololeveling.jpg',
-      description: 'Em um mundo onde caçadores lutam contra monstros...',
-      staff: { nodes: [{ name: { full: 'Chugong' } }] },
-      studios: { nodes: [{ name: 'A-1 Pictures' }] },
-      genres: ['Action', 'Adventure', 'Fantasy'],
-      seasonYear: 2024,
-      status: 'FINISHED',
-      episodes: 12,
-      chapters: 200
-    }).pipe(
-      timeout({ each: this.TIMEOUT_LIMIT }),
-      retry(2), // 2 tentativas extras se der timeout/erro
-      map(data => this.normalizeAniList(data))
-    );
-
-    return firstValueFrom(obs$);
+  private fetchMedia(provider: ContentProvider, id: string, type: MediaType): Promise<NormalizedMedia> {
+    if (provider === 'anilist') return this.fetchAniListMedia(id, type);
+    if (provider === 'jikan') return this.fetchJikanMedia(id, type);
+    return this.fetchKitsuMedia(id, type);
   }
 
-  // Simulação de Chamada Jikan (REST - Fallback 1)
-  private async fetchFromJikan(id: string, type: 'ANIME' | 'MANGA'): Promise<NormalizedMedia> {
-    const obs$ = of({
-      mal_id: parseInt(id),
-      title: 'Solo Leveling (Jikan)',
-      type: type === 'ANIME' ? 'TV' : 'Manga',
-      images: { jpg: { large_image_url: 'https://images.aniboxd.com/covers/sololeveling_jikan.jpg' } },
-      synopsis: 'Jikan fallback synopsis here...',
-      authors: [{ name: 'Chugong' }],
-      studios: [{ name: 'A-1 Pictures' }],
-      genres: [{ name: 'Action' }],
-      aired: { prop: { from: { year: 2024 } } },
-      status: 'Finished Airing',
-      episodes: 12,
-      chapters: 200
-    }).pipe(
-      timeout({ each: this.TIMEOUT_LIMIT }),
-      retry(1),
-      map(data => this.normalizeJikan(data))
-    );
-
-    return firstValueFrom(obs$);
+  private searchProvider(provider: ContentProvider, query: string, type: MediaType, page: number, perPage: number): Promise<MediaSearchResult> {
+    if (provider === 'anilist') return this.searchAniList(query, type, page, perPage);
+    if (provider === 'jikan') return this.searchJikan(query, type, page, perPage);
+    return this.searchKitsu(query, type, page, perPage);
   }
 
-  // Simulação de Chamada Kitsu (REST - Fallback 2)
-  private async fetchFromKitsu(id: string, type: 'ANIME' | 'MANGA'): Promise<NormalizedMedia> {
-    const obs$ = of({
-      id: id,
-      attributes: {
-        canonicalTitle: 'Solo Leveling (Kitsu)',
-        subtype: type === 'ANIME' ? 'tv' : 'manga',
-        posterImage: { large: 'https://images.aniboxd.com/covers/sololeveling_kitsu.jpg' },
-        coverImage: { large: 'https://images.aniboxd.com/banners/sololeveling_kitsu.jpg' },
-        synopsis: 'Kitsu fallback synopsis here...',
-        status: 'finished',
-        episodeCount: 12,
-        chapterCount: 200
-      }
-    }).pipe(
-      timeout({ each: this.TIMEOUT_LIMIT }),
-      map(data => this.normalizeKitsu(data))
-    );
-
-    return firstValueFrom(obs$);
+  private async fetchAniListMedia(id: string, type: MediaType): Promise<NormalizedMedia> {
+    const response = await this.requestJson(this.env('ANILIST_API_URL', 'https://graphql.anilist.co'), {
+      method: 'POST',
+      headers: this.headers('ANILIST_API_KEY', 'application/json'),
+      body: JSON.stringify({ query: `query ($id: Int, $type: MediaType) { Media(id: $id, type: $type) { id type title { romaji english native } coverImage { large } bannerImage description(asHtml: false) staff { nodes { name { full } } } studios { nodes { name } } genres seasonYear status episodes chapters } }`, variables: { id: Number(id), type } }),
+    });
+    const media = response?.data?.Media;
+    if (!media) throw new HttpException('Obra não encontrada.', HttpStatus.NOT_FOUND);
+    return this.normalizeAniList(media);
   }
 
-  // Normalizadores de Dados
-  private normalizeAniList(data: any): NormalizedMedia {
-    return {
-      externalId: data.id,
-      title: data.title.english || data.title.romaji,
-      type: data.type,
-      coverUrl: data.coverImage?.large || null,
-      bannerUrl: data.bannerImage || null,
-      synopsis: data.description || null,
-      author: data.staff?.nodes?.[0]?.name?.full || 'Desconhecido',
-      studio: data.studios?.nodes?.[0]?.name || 'Desconhecido',
-      genres: data.genres || [],
-      releaseYear: data.seasonYear || null,
-      status: this.mapStatus(data.status),
-      totalEpisodes: data.episodes || 0,
-      totalChapters: data.chapters || 0
-    };
+  private async searchAniList(query: string, type: MediaType, page: number, perPage: number): Promise<MediaSearchResult> {
+    const response = await this.requestJson(this.env('ANILIST_API_URL', 'https://graphql.anilist.co'), {
+      method: 'POST',
+      headers: this.headers('ANILIST_API_KEY', 'application/json'),
+      body: JSON.stringify({ query: `query ($search: String!, $type: MediaType, $page: Int, $perPage: Int) { Page(page: $page, perPage: $perPage) { pageInfo { hasNextPage } media(search: $search, type: $type) { id type title { romaji english native } coverImage { large } bannerImage description(asHtml: false) staff { nodes { name { full } } } studios { nodes { name } } genres seasonYear status episodes chapters } } }`, variables: { search: query, type, page, perPage } }),
+    });
+    const pageData = response?.data?.Page;
+    if (!pageData) throw new Error('Resposta inválida da AniList.');
+    return { items: (pageData.media ?? []).map((media: any) => this.normalizeAniList(media)), page, perPage, hasNextPage: Boolean(pageData.pageInfo?.hasNextPage), provider: 'anilist' };
   }
 
-  private normalizeJikan(data: any): NormalizedMedia {
-    const jikanType = data.type?.toUpperCase() || '';
-    return {
-      externalId: data.mal_id ? data.mal_id.toString() : '',
-      title: data.title || 'Desconhecido',
-      type: ['TV', 'MOVIE', 'OVA', 'SPECIAL', 'ONA', 'MUSIC'].includes(jikanType) ? 'ANIME' : 'MANGA',
-      coverUrl: data.images?.jpg?.large_image_url || null,
-      bannerUrl: null,
-      synopsis: data.synopsis || null,
-      author: data.authors?.[0]?.name || 'Desconhecido',
-      studio: data.studios?.[0]?.name || 'Desconhecido',
-      genres: data.genres?.map((g: any) => g.name) || [],
-      releaseYear: data.aired?.prop?.from?.year || null,
-      status: this.mapStatus(data.status),
-      totalEpisodes: data.episodes || 0,
-      totalChapters: data.chapters || 0
-    };
+  private normalizeAniList(media: any): NormalizedMedia {
+    return { externalId: String(media.id), title: media.title?.english || media.title?.romaji || media.title?.native || 'Sem título', type: media.type === 'MANGA' ? 'MANGA' : 'ANIME', coverUrl: media.coverImage?.large || null, bannerUrl: media.bannerImage || null, synopsis: media.description || null, author: media.staff?.nodes?.[0]?.name?.full || null, studio: media.studios?.nodes?.[0]?.name || null, genres: Array.isArray(media.genres) ? media.genres : [], releaseYear: media.seasonYear ?? null, status: this.mapStatus(media.status), totalEpisodes: media.episodes ?? 0, totalChapters: media.chapters ?? 0, provider: 'anilist' };
   }
 
-  private normalizeKitsu(data: any): NormalizedMedia {
-    const attr = data?.attributes || {};
-    const kitsuSubtype = attr.subtype?.toUpperCase() || '';
-    return {
-      externalId: data.id || '',
-      title: attr.canonicalTitle || 'Desconhecido',
-      type: ['TV', 'MOVIE', 'OVA', 'SPECIAL', 'ONA', 'MUSIC'].includes(kitsuSubtype) ? 'ANIME' : 'MANGA',
-      coverUrl: attr.posterImage?.large || null,
-      bannerUrl: attr.coverImage?.large || null,
-      synopsis: attr.synopsis || null,
-      author: 'Desconhecido',
-      studio: 'Desconhecido',
-      genres: [],
-      releaseYear: null,
-      status: this.mapStatus(attr.status),
-      totalEpisodes: attr.episodeCount || 0,
-      totalChapters: attr.chapterCount || 0
-    };
+  private async fetchJikanMedia(id: string, type: MediaType): Promise<NormalizedMedia> {
+    const resource = type === 'ANIME' ? 'anime' : 'manga';
+    const data = await this.requestJson(`${this.env('JIKAN_API_URL', 'https://api.jikan.moe/v4')}/${resource}/${encodeURIComponent(id)}/full`, { headers: this.headers('JIKAN_API_KEY', 'application/json') });
+    if (!data?.data) throw new HttpException('Obra não encontrada.', HttpStatus.NOT_FOUND);
+    return this.normalizeJikan(data.data, type);
   }
 
-  private mapStatus(status: string): 'AIRING' | 'FINISHED' | 'UPCOMING' | 'HIATUS' | 'CANCELLED' {
-    if (!status) return 'UPCOMING';
-    const s = status.toUpperCase();
-    if (s.includes('FINISHED') || s.includes('COMPLETED')) return 'FINISHED';
-    if (s.includes('AIRING') || s.includes('CURRENT') || s.includes('RELEASING')) return 'AIRING';
-    if (s.includes('HIATUS')) return 'HIATUS';
-    if (s.includes('CANCELLED') || s.includes('CANCELED')) return 'CANCELLED';
+  private async searchJikan(query: string, type: MediaType, page: number, perPage: number): Promise<MediaSearchResult> {
+    const resource = type === 'ANIME' ? 'anime' : 'manga';
+    const url = `${this.env('JIKAN_API_URL', 'https://api.jikan.moe/v4')}/${resource}?q=${encodeURIComponent(query)}&page=${page}&limit=${perPage}`;
+    const data = await this.requestJson(url, { headers: this.headers('JIKAN_API_KEY', 'application/json') });
+    return { items: (data?.data ?? []).map((media: any) => this.normalizeJikan(media, type)), page, perPage, hasNextPage: Boolean(data?.pagination?.has_next_page), provider: 'jikan' };
+  }
+
+  private normalizeJikan(media: any, type: MediaType): NormalizedMedia {
+    return { externalId: String(media.mal_id), title: media.title || media.title_english || media.title_japanese || 'Sem título', type, coverUrl: media.images?.jpg?.large_image_url || media.images?.jpg?.image_url || null, bannerUrl: null, synopsis: media.synopsis || null, author: media.authors?.[0]?.name || null, studio: media.studios?.[0]?.name || null, genres: (media.genres ?? []).map((genre: any) => genre.name).filter(Boolean), releaseYear: media.aired?.prop?.from?.year ?? media.published?.prop?.from?.year ?? null, status: this.mapStatus(media.status), totalEpisodes: media.episodes ?? 0, totalChapters: media.chapters ?? 0, provider: 'jikan' };
+  }
+
+  private async fetchKitsuMedia(id: string, type: MediaType): Promise<NormalizedMedia> {
+    const resource = type === 'ANIME' ? 'anime' : 'manga';
+    const data = await this.requestJson(`${this.env('KITSU_API_URL', 'https://kitsu.io/api/edge')}/${resource}/${encodeURIComponent(id)}`, { headers: this.headers('KITSU_API_KEY', 'application/vnd.api+json') });
+    if (!data?.data?.attributes) throw new HttpException('Obra não encontrada.', HttpStatus.NOT_FOUND);
+    return this.normalizeKitsu(data.data, type);
+  }
+
+  private async searchKitsu(query: string, type: MediaType, page: number, perPage: number): Promise<MediaSearchResult> {
+    const resource = type === 'ANIME' ? 'anime' : 'manga';
+    const offset = (page - 1) * perPage;
+    const url = `${this.env('KITSU_API_URL', 'https://kitsu.io/api/edge')}/${resource}?filter[text]=${encodeURIComponent(query)}&page[limit]=${perPage}&page[offset]=${offset}`;
+    const data = await this.requestJson(url, { headers: this.headers('KITSU_API_KEY', 'application/vnd.api+json') });
+    return { items: (data?.data ?? []).map((item: any) => this.normalizeKitsu(item, type)), page, perPage, hasNextPage: Boolean(data?.links?.next), provider: 'kitsu' };
+  }
+
+  private normalizeKitsu(media: any, type: MediaType): NormalizedMedia {
+    const attributes = media.attributes ?? {};
+    return { externalId: String(media.id), title: attributes.canonicalTitle || attributes.titles?.en || attributes.titles?.en_jp || 'Sem título', type, coverUrl: attributes.posterImage?.large || attributes.posterImage?.original || null, bannerUrl: attributes.coverImage?.large || attributes.coverImage?.original || null, synopsis: attributes.synopsis || null, author: null, studio: null, genres: [], releaseYear: attributes.startDate ? Number(String(attributes.startDate).slice(0, 4)) : null, status: this.mapStatus(attributes.status), totalEpisodes: attributes.episodeCount ?? 0, totalChapters: attributes.chapterCount ?? 0, provider: 'kitsu' };
+  }
+
+  private mapStatus(value: unknown): NormalizedMedia['status'] {
+    const status = String(value ?? '').toUpperCase();
+    if (status.includes('FINISH') || status.includes('COMPLETE')) return 'FINISHED';
+    if (status.includes('AIRING') || status.includes('CURRENT') || status.includes('RELEAS')) return 'AIRING';
+    if (status.includes('HIATUS')) return 'HIATUS';
+    if (status.includes('CANCEL')) return 'CANCELLED';
     return 'UPCOMING';
   }
 
-  // Métodos Utilitários do Cache (simulado)
-  private getCache(key: string): NormalizedMedia | null {
-    const item = this.redisCache.get(key);
-    if (!item) return null;
-    if (Date.now() > item.expiresAt) {
-      this.redisCache.delete(key);
-      return null;
-    }
-    return item.data;
+  private headers(keyName: string, accept: string): Record<string, string> {
+    const headers: Record<string, string> = { Accept: accept };
+    const key = process.env[keyName];
+    if (key) headers.Authorization = `Bearer ${key}`;
+    return headers;
   }
 
-  private setCache(key: string, data: NormalizedMedia, ttlSeconds: number): void {
-    const expiresAt = Date.now() + ttlSeconds * 1000;
-    this.redisCache.set(key, { data, expiresAt });
+  private env(name: string, fallback: string): string { return process.env[name]?.trim() || fallback; }
+
+  private async requestJson(url: string, init: RequestInit): Promise<any> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const response = await fetch(url, { ...init, signal: controller.signal });
+      const body = await response.json().catch(() => null);
+      if (!response.ok) {
+        if (response.status === 404) throw new HttpException('Recurso não encontrado.', HttpStatus.NOT_FOUND);
+        throw new Error(`Provider HTTP ${response.status}`);
+      }
+      return body;
+    } catch (error: any) {
+      if (error?.name === 'AbortError') throw new Error('Provider timeout');
+      throw error;
+    } finally { clearTimeout(timeout); }
   }
+
+  private getCache<T>(key: string): T | null {
+    const entry = this.cache.get(key);
+    if (!entry) return null;
+    if (entry.expiresAt <= Date.now()) { this.cache.delete(key); return null; }
+    return entry.data as T;
+  }
+
+  private setCache(key: string, data: unknown, ttlSeconds: number): void { this.cache.set(key, { data, expiresAt: Date.now() + ttlSeconds * 1000 }); }
 }
