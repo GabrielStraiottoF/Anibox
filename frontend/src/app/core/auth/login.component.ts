@@ -1,6 +1,4 @@
-import { CommonModule } from '@angular/common';
 import { Component, inject } from '@angular/core';
-import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { ActivatedRoute, Router } from '@angular/router';
 import { finalize } from 'rxjs/operators';
 import { AuthService } from './auth.service';
@@ -8,7 +6,6 @@ import { AuthService } from './auth.service';
 @Component({
   standalone: true,
   selector: 'app-login',
-  imports: [CommonModule, ReactiveFormsModule],
   template: `
     <main class="login-page">
       <section class="login-card" aria-labelledby="login-title">
@@ -17,34 +14,41 @@ import { AuthService } from './auth.service';
           <p>Entre na sua conta</p>
         </div>
 
-        <form [formGroup]="form" (ngSubmit)="submit()" novalidate>
+        <form (submit)="submit(emailInput.value, passwordInput.value, $event)" novalidate>
           <label for="email">E-mail</label>
           <input
+            #emailInput
             id="email"
             type="email"
-            formControlName="email"
             autocomplete="email"
             placeholder="seu@email.com"
+            required
           />
-          <small *ngIf="form.controls.email.touched && form.controls.email.invalid">
-            Informe um e-mail válido.
-          </small>
+          @if (emailTouched && !isEmailValid(emailInput.value)) {
+            <small>Informe um e-mail válido.</small>
+          }
 
           <label for="password">Senha</label>
           <input
+            #passwordInput
             id="password"
             type="password"
-            formControlName="password"
             autocomplete="current-password"
             placeholder="Sua senha"
+            required
           />
-          <small *ngIf="form.controls.password.touched && form.controls.password.invalid">
-            A senha é obrigatória.
-          </small>
+          @if (passwordTouched && !passwordInput.value.trim()) {
+            <small>A senha é obrigatória.</small>
+          }
 
-          <p *ngIf="errorMessage" class="error" role="alert">{{ errorMessage }}</p>
+          @if (errorMessage) {
+            <p class="error" role="alert">{{ errorMessage }}</p>
+          }
 
-          <button type="submit" [disabled]="form.invalid || loading">
+          <button
+            type="submit"
+            [disabled]="loading || !isEmailValid(emailInput.value) || !passwordInput.value.trim()"
+          >
             {{ loading ? 'Entrando...' : 'Entrar' }}
           </button>
         </form>
@@ -98,22 +102,28 @@ import { AuthService } from './auth.service';
   ],
 })
 export class LoginComponent {
-  private readonly fb = inject(FormBuilder);
   private readonly authService = inject(AuthService);
   private readonly router = inject(Router);
   private readonly route = inject(ActivatedRoute);
 
-  readonly form = this.fb.nonNullable.group({
-    email: ['', [Validators.required, Validators.email]],
-    password: ['', Validators.required],
-  });
-
   loading = false;
+  emailTouched = false;
+  passwordTouched = false;
   errorMessage = '';
 
-  submit(): void {
-    if (this.form.invalid || this.loading) {
-      this.form.markAllAsTouched();
+  isEmailValid(email: string): boolean {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+  }
+
+  submit(email: string, password: string, event: SubmitEvent): void {
+    event.preventDefault();
+    this.emailTouched = true;
+    this.passwordTouched = true;
+
+    const normalizedEmail = email.trim();
+    const normalizedPassword = password.trim();
+
+    if (!this.isEmailValid(normalizedEmail) || !normalizedPassword || this.loading) {
       return;
     }
 
@@ -121,7 +131,7 @@ export class LoginComponent {
     this.errorMessage = '';
 
     this.authService
-      .login(this.form.getRawValue())
+      .login({ email: normalizedEmail, password: normalizedPassword })
       .pipe(finalize(() => (this.loading = false)))
       .subscribe({
         next: () => {
