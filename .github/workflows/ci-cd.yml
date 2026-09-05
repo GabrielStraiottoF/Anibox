@@ -2,62 +2,77 @@ name: Aniboxd CI/CD Pipeline
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 jobs:
-  lint-and-test:
-    name: Lint & Run Tests
+  validate:
+    name: Validate, Build & Test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: 'npm'
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
 
-      - name: Install Monorepo Dependencies
-        run: |
-          npm ci --prefix backend || echo "Nenhum lockfile de backend ainda"
-          npm ci --prefix frontend || echo "Nenhum lockfile de frontend ainda"
+      - name: Install Backend Dependencies
+        run: npm ci --prefix backend
 
-      - name: Lint Code
-        run: |
-          npm run lint --prefix backend || echo "Skip backend lint"
-          npm run lint --prefix frontend || echo "Skip frontend lint"
+      - name: Install Frontend Dependencies
+        run: npm ci --prefix frontend
 
-      - name: Run Backend Unit Tests
-        run: |
-          npm run test --prefix backend || echo "Skip backend tests"
+      - name: Build Backend
+        run: npm run build --prefix backend
 
-      - name: Run Frontend Unit Tests
+      - name: Build Frontend
+        run: npm run build --prefix frontend
+
+      - name: Run Backend Tests When Present
+        shell: bash
         run: |
-          npm run test:prod --prefix frontend || echo "Skip frontend tests"
+          if compgen -G "backend/src/**/*.spec.ts" > /dev/null || compgen -G "backend/test/**/*.ts" > /dev/null; then
+            npm test --prefix backend
+          else
+            echo "No backend tests found; build validation completed."
+          fi
+
+      - name: Run Frontend Tests When Present
+        shell: bash
+        run: |
+          if compgen -G "frontend/src/**/*.spec.ts" > /dev/null; then
+            npm test --prefix frontend -- --watch=false --browsers=ChromeHeadless
+          else
+            echo "No frontend tests found; build validation completed."
+          fi
 
   build-and-push:
     name: Build & Push Docker Images
-    needs: lint-and-test
+    needs: validate
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build & Push Backend
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v6
         with:
           context: ./backend
           file: ./backend/Dockerfile
@@ -67,7 +82,7 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/aniboxd-backend:${{ github.sha }}
 
       - name: Build & Push Frontend
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v6
         with:
           context: ./frontend
           file: ./frontend/Dockerfile
