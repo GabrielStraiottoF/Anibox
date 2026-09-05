@@ -28,10 +28,11 @@ export class AuthController {
   @Post('logout')
   async logout(@Req() request: Request, @Res({ passthrough: true }) response: Response) {
     await this.authService.logout(this.readRefreshCookie(request));
+    const production = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
     response.clearCookie(this.authService.getRefreshCookieName(), {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL),
-      sameSite: 'lax',
+      secure: production,
+      sameSite: production ? 'none' as const : 'lax' as const,
       path: '/api/v1/auth',
     });
     return { success: true };
@@ -39,9 +40,7 @@ export class AuthController {
 
   @UseGuards(AuthGuard)
   @Get('me')
-  async me(@CurrentUser() user: AuthenticatedUser) {
-    return this.authService.me(user.id);
-  }
+  async me(@CurrentUser() user: AuthenticatedUser) { return this.authService.me(user.id); }
 
   private withRefreshCookie(response: Response, result: { response: unknown; refreshToken: string; refreshMaxAgeMs: number }) {
     response.cookie(this.authService.getRefreshCookieName(), result.refreshToken, this.authService.getRefreshCookieOptions(result.refreshMaxAgeMs));
@@ -58,9 +57,6 @@ export class AuthController {
   private metadata(request: Request) {
     const forwarded = request.headers['x-forwarded-for'];
     const ip = typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : request.ip;
-    return {
-      ip,
-      userAgent: typeof request.headers['user-agent'] === 'string' ? request.headers['user-agent'] : undefined,
-    };
+    return { ip, userAgent: typeof request.headers['user-agent'] === 'string' ? request.headers['user-agent'] : undefined };
   }
 }
