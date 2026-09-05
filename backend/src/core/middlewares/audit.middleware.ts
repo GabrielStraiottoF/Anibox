@@ -1,7 +1,7 @@
 import { Injectable, Logger, NestMiddleware } from '@nestjs/common';
 import { Request, Response, NextFunction } from 'express';
 import * as jwt from 'jsonwebtoken';
-import { PrismaService } from '../../prisma/prisma.service';
+import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class AuditMiddleware implements NestMiddleware {
@@ -22,11 +22,9 @@ export class AuditMiddleware implements NestMiddleware {
       const durationMs = Date.now() - startedAt;
       const action = this.resolveAction(method, originalUrl, statusCode);
       const payload = { method, url: originalUrl, statusCode, durationMs, timestamp: new Date().toISOString() };
-
       this.logger.log(`[AUDIT] ${action} | user=${userId ?? 'anonymous'} | ${method} ${originalUrl} | ${statusCode} | ${durationMs}ms`);
       void this.persist({ userId, action, ip, userAgent, payload });
     });
-
     next();
   }
 
