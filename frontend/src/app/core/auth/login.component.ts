@@ -135,7 +135,7 @@ export class LoginComponent {
       .pipe(finalize(() => (this.loading = false)))
       .subscribe({
         next: () => {
-          const returnUrl = this.route.snapshot.queryParamMap.get('returnUrl') || '/';
+          const returnUrl = this.route.snapshot.queryParamMap.get('returnUrl') || '/home';
           void this.router.navigateByUrl(returnUrl);
         },
         error: () => {
