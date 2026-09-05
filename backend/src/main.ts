@@ -11,7 +11,9 @@ export async function createApp() {
   const configuredOrigins =
     process.env.FRONTEND_URLS ??
     process.env.FRONTEND_URL ??
-    'http://localhost:4200';
+    (process.env.NODE_ENV === 'production' || process.env.VERCEL
+      ? 'https://aniboxfront.vercel.app'
+      : 'http://localhost:4200');
 
   const allowedOrigins = configuredOrigins
     .split(',')
