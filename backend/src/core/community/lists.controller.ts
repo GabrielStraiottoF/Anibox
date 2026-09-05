@@ -1,9 +1,10 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, UseGuards, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '../guards/auth.guard';
 import { CurrentUser } from '../decorators/current-user.decorator';
 import { AuthenticatedUser } from '../types/auth.types';
 import { CommunityService } from './community.service';
 import type { Request } from 'express';
+import * as jwt from 'jsonwebtoken';
 
 @Controller('lists')
 export class ListsController {
@@ -18,10 +19,7 @@ export class ListsController {
   create(@CurrentUser() user: AuthenticatedUser, @Body() body: any) { return this.community.createList(user.id, body); }
 
   @Get(':id')
-  get(@Param('id') id: string, @Req() request: Request) {
-    const header = request.headers.authorization;
-    return this.community.getList(this.readUserId(header), id);
-  }
+  get(@Param('id') id: string, @Req() request: Request) { return this.community.getList(this.readUserId(request), id); }
 
   @UseGuards(AuthGuard)
   @Patch(':id')
@@ -39,7 +37,14 @@ export class ListsController {
   @Delete(':id/media/:mediaId')
   removeMedia(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Param('mediaId') mediaId: string) { return this.community.removeFromList(user.id, id, mediaId); }
 
-  private readUserId(header?: string): string | null {
-    return null;
+  private readUserId(request: Request): string | null {
+    const header = request.headers.authorization;
+    if (!header?.startsWith('Bearer ')) return null;
+    const secret = process.env.JWT_SECRET;
+    if (!secret) return null;
+    try {
+      const payload = jwt.verify(header.slice(7).trim(), secret) as jwt.JwtPayload;
+      return typeof payload.sub === 'string' ? payload.sub : null;
+    } catch { return null; }
   }
 }
