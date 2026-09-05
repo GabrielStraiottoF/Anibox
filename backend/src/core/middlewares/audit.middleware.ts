@@ -1,4 +1,5 @@
 import { Injectable, Logger, NestMiddleware } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { Request, Response, NextFunction } from 'express';
 import * as jwt from 'jsonwebtoken';
 import { PrismaService } from '../prisma/prisma.service';
@@ -21,16 +22,30 @@ export class AuditMiddleware implements NestMiddleware {
       const statusCode = res.statusCode;
       const durationMs = Date.now() - startedAt;
       const action = this.resolveAction(method, originalUrl, statusCode);
-      const payload = { method, url: originalUrl, statusCode, durationMs, timestamp: new Date().toISOString() };
+      const payload: Prisma.InputJsonValue = {
+        method,
+        url: originalUrl,
+        statusCode,
+        durationMs,
+        timestamp: new Date().toISOString(),
+      };
       this.logger.log(`[AUDIT] ${action} | user=${userId ?? 'anonymous'} | ${method} ${originalUrl} | ${statusCode} | ${durationMs}ms`);
       void this.persist({ userId, action, ip, userAgent, payload });
     });
     next();
   }
 
-  private async persist(data: { userId: string | null; action: string; ip: string | null; userAgent: string | null; payload: Record<string, unknown> }): Promise<void> {
+  private async persist(data: { userId: string | null; action: string; ip: string | null; userAgent: string | null; payload: Prisma.InputJsonValue }): Promise<void> {
     try {
-      await this.prisma.auditLog.create({ data: { userId: data.userId, action: data.action, ipAddress: data.ip, userAgent: data.userAgent, payload: data.payload } });
+      await this.prisma.auditLog.create({
+        data: {
+          userId: data.userId,
+          action: data.action,
+          ipAddress: data.ip,
+          userAgent: data.userAgent,
+          payload: data.payload,
+        },
+      });
     } catch (error: any) {
       this.logger.error(`Falha ao persistir auditoria: ${error?.message ?? error}`);
     }
