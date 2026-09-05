@@ -25,10 +25,7 @@ export class AuthService {
     if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(username)) throw new BadRequestException('Username deve ter entre 3 e 32 caracteres e conter apenas letras, números, _, - ou .');
     const existing = await this.prisma.user.findFirst({ where: { OR: [{ email }, { username }] }, select: { email: true } });
     if (existing) throw new ConflictException(existing.email === email ? 'E-mail já cadastrado.' : 'Username já cadastrado.');
-    const user = await this.prisma.user.create({
-      data: { email, username, passwordHash: await this.hashPassword(password), profile: { create: {} } },
-      select: { id: true, email: true, username: true, role: true },
-    });
+    const user = await this.prisma.user.create({ data: { email, username, passwordHash: await this.hashPassword(password), profile: { create: {} } }, select: { id: true, email: true, username: true, role: true } });
     return this.createIssuedSession(user, metadata);
   }
 
@@ -58,6 +55,24 @@ export class AuthService {
 
   async logout(refreshToken: string): Promise<void> {
     if (refreshToken) await this.prisma.session.deleteMany({ where: { tokenHash: this.hashToken(refreshToken) } });
+  }
+
+  async logoutAll(userId: string): Promise<void> {
+    await this.prisma.session.deleteMany({ where: { userId } });
+  }
+
+  async changePassword(userId: string, currentPassword: string, newPassword: string): Promise<void> {
+    this.validatePassword(newPassword);
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { passwordHash: true } });
+    if (!user || !(await this.verifyPassword(currentPassword, user.passwordHash))) throw new UnauthorizedException('Senha atual inválida.');
+    await this.prisma.user.update({ where: { id: userId }, data: { passwordHash: await this.hashPassword(newPassword) } });
+    await this.prisma.session.deleteMany({ where: { userId } });
+  }
+
+  async deleteAccount(userId: string, password: string): Promise<void> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { passwordHash: true } });
+    if (!user || !(await this.verifyPassword(password, user.passwordHash))) throw new UnauthorizedException('Senha inválida.');
+    await this.prisma.user.delete({ where: { id: userId } });
   }
 
   async me(userId: string): Promise<AuthenticatedUser> {
@@ -90,12 +105,8 @@ export class AuthService {
   }
 
   private buildUser(user: { id: string; email: string; username: string; role: AuthenticatedUser['role'] }): AuthenticatedUser { return { id: user.id, email: user.email, username: user.username, role: user.role }; }
-
-  private validateCredentials(email: string, password: string): void {
-    if (!email || !/^\S+@\S+\.\S+$/.test(email)) throw new BadRequestException('E-mail inválido.');
-    if (password.length < 8 || password.length > 200) throw new BadRequestException('A senha deve ter entre 8 e 200 caracteres.');
-  }
-
+  private validateCredentials(email: string, password: string): void { if (!email || !/^\S+@\S+\.\S+$/.test(email)) throw new BadRequestException('E-mail inválido.'); this.validatePassword(password); }
+  private validatePassword(password: string): void { if (password.length < 8 || password.length > 200) throw new BadRequestException('A senha deve ter entre 8 e 200 caracteres.'); }
   private async hashPassword(password: string): Promise<string> { const salt = randomBytes(16).toString('hex'); const derived = (await scrypt(password, salt, 64)) as Buffer; return `scrypt$${salt}$${derived.toString('hex')}`; }
   private async verifyPassword(password: string, stored: string): Promise<boolean> { const [algorithm, salt, digest] = stored.split('$'); if (algorithm !== 'scrypt' || !salt || !digest) return false; const derived = (await scrypt(password, salt, 64)) as Buffer; return derived.toString('hex') === digest; }
   private hashToken(token: string): string { return createHash('sha256').update(token).digest('hex'); }
