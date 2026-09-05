@@ -12,6 +12,11 @@ export const routes: Routes = [
       import('./core/auth/login.component').then((module) => module.LoginComponent),
   },
   {
+    path: 'home',
+    loadComponent: () =>
+      import('./home/home.component').then((module) => module.HomeComponent),
+  },
+  {
     path: '**',
     redirectTo: 'auth/login',
   },
